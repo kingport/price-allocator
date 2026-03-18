@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback } from "react";
+import * as XLSX from "xlsx";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -12,7 +13,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import {
   Table,
   TableBody,
@@ -45,6 +45,28 @@ export default function Home() {
   const [contextMenu, setContextMenu] = useState<{ price: number; x: number; y: number } | null>(null);
   const [results, setResults] = useState<AllocationResult[] | null>(null);
   const [error, setError] = useState("");
+
+  const exportExcel = useCallback(() => {
+    if (!results) return;
+    const data = results.map((r, i) => ({
+      "序号": i + 1,
+      "单价": r.price,
+      "数量": r.quantity,
+      "小计": parseFloat(r.subtotal.toFixed(2)),
+    }));
+    data.push({
+      "序号": null as unknown as number,
+      "单价": null as unknown as number,
+      "数量": "合计" as unknown as number,
+      "小计": parseFloat(results.reduce((s, r) => s + r.subtotal, 0).toFixed(2)),
+    });
+    const ws = XLSX.utils.json_to_sheet(data);
+    // Set column widths
+    ws["!cols"] = [{ wch: 6 }, { wch: 10 }, { wch: 12 }, { wch: 14 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "分配结果");
+    XLSX.writeFile(wb, `分配结果_${new Date().toLocaleDateString("zh-CN").replace(/\//g, "-")}.xlsx`);
+  }, [results]);
 
   const addPrice = useCallback(() => {
     const value = parseFloat(newPrice);
@@ -561,7 +583,7 @@ export default function Home() {
                 <div>
                   <CardTitle>单价列表</CardTitle>
                   <CardDescription>
-                    点击选中/取消，右键设置属性（已选 {selectedPrices.size}/
+                    点击选中/取消，点 ⚙ 设置属性（已选 {selectedPrices.size}/
                     {prices.length}
                     {requiredPrices.size > 0 && `，必选 ${requiredPrices.size}`}
                     {maxSharePrice !== null && `，占比最大 ${maxSharePrice}`}）
@@ -578,88 +600,91 @@ export default function Home() {
               </div>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="relative flex flex-wrap gap-2">
+              <div className="relative flex flex-wrap gap-3">
                 {prices.map((price) => {
                   const isSelected = selectedPrices.has(price);
                   const isRequired = requiredPrices.has(price);
                   const isMaxShare = maxSharePrice === price;
+                  const isMenuOpen = contextMenu?.price === price;
                   return (
-                    <Badge
-                      key={price}
-                      variant={isSelected ? "default" : "outline"}
-                      className={`cursor-pointer select-none px-3 py-1.5 text-sm ${
-                        isRequired && isMaxShare
-                          ? "ring-2 ring-orange-400 border-blue-400 shadow-[0_0_0_3px_rgba(96,165,250,0.3)]"
-                          : isRequired
-                            ? "ring-2 ring-orange-400"
-                            : isMaxShare
-                              ? "ring-2 ring-blue-400"
-                              : ""
-                      }`}
-                      onClick={() => toggleSelect(price)}
-                      onContextMenu={(e) => {
-                        e.preventDefault();
-                        setContextMenu({ price, x: e.clientX, y: e.clientY });
-                      }}
-                    >
-                      {isRequired && <span className="mr-1 text-orange-400">★</span>}
-                      {isMaxShare && <span className="mr-1 text-blue-400">▲</span>}
-                      {price}
-                      <button
-                        className="ml-2 hover:text-destructive"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          removePrice(price);
-                        }}
+                    <div key={price} className="relative">
+                      <div
+                        className={`inline-flex items-center gap-1.5 rounded-lg border px-4 py-2.5 text-base font-medium cursor-pointer select-none transition-colors ${
+                          isSelected
+                            ? "bg-primary text-primary-foreground border-primary"
+                            : "bg-background border-input hover:bg-accent"
+                        } ${
+                          isRequired && isMaxShare
+                            ? "ring-2 ring-orange-400 shadow-[0_0_0_3px_rgba(96,165,250,0.3)]"
+                            : isRequired
+                              ? "ring-2 ring-orange-400"
+                              : isMaxShare
+                                ? "ring-2 ring-blue-400"
+                                : ""
+                        }`}
+                        onClick={() => toggleSelect(price)}
                       >
-                        x
-                      </button>
-                    </Badge>
+                        {isRequired && <span className="text-orange-400">★</span>}
+                        {isMaxShare && <span className="text-blue-400">▲</span>}
+                        <span>{price}</span>
+                        <button
+                          className="ml-1 rounded p-0.5 opacity-60 hover:opacity-100"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setContextMenu(
+                              isMenuOpen ? null : { price, x: 0, y: 0 }
+                            );
+                          }}
+                        >
+                          ⚙
+                        </button>
+                        <button
+                          className="ml-0.5 rounded p-0.5 opacity-60 hover:opacity-100 hover:text-destructive"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removePrice(price);
+                          }}
+                        >
+                          ✕
+                        </button>
+                      </div>
+
+                      {/* Dropdown menu */}
+                      {isMenuOpen && (
+                        <>
+                          <div
+                            className="fixed inset-0 z-40"
+                            onClick={() => setContextMenu(null)}
+                          />
+                          <div className="absolute left-0 top-full z-50 mt-1 min-w-[160px] rounded-lg border bg-popover p-1 shadow-lg">
+                            <button
+                              className="flex w-full items-center gap-2 rounded-md px-3 py-2.5 text-sm hover:bg-accent text-left"
+                              onClick={() => {
+                                toggleRequired(price);
+                                setContextMenu(null);
+                              }}
+                            >
+                              <span className="text-orange-400">★</span>
+                              {isRequired ? "取消必选" : "设为必选"}
+                            </button>
+                            <button
+                              className="flex w-full items-center gap-2 rounded-md px-3 py-2.5 text-sm hover:bg-accent text-left"
+                              onClick={() => {
+                                setMaxSharePrice((prev) =>
+                                  prev === price ? null : price
+                                );
+                                setContextMenu(null);
+                              }}
+                            >
+                              <span className="text-blue-400">▲</span>
+                              {isMaxShare ? "取消占比最大" : "设为占比最大"}
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </div>
                   );
                 })}
-
-                {/* Context Menu */}
-                {contextMenu && (
-                  <div
-                    className="fixed inset-0 z-50"
-                    onClick={() => setContextMenu(null)}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      setContextMenu(null);
-                    }}
-                  >
-                    <div
-                      className="absolute z-50 min-w-[160px] rounded-lg border bg-popover p-1 shadow-md"
-                      style={{ left: contextMenu.x, top: contextMenu.y }}
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <button
-                        className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm hover:bg-accent text-left"
-                        onClick={() => {
-                          toggleRequired(contextMenu.price);
-                          setContextMenu(null);
-                        }}
-                      >
-                        <span className="text-orange-400">★</span>
-                        {requiredPrices.has(contextMenu.price) ? "取消必选" : "设为必选"}
-                      </button>
-                      <button
-                        className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm hover:bg-accent text-left"
-                        onClick={() => {
-                          setMaxSharePrice((prev) =>
-                            prev === contextMenu.price ? null : contextMenu.price
-                          );
-                          setContextMenu(null);
-                        }}
-                      >
-                        <span className="text-blue-400">▲</span>
-                        {maxSharePrice === contextMenu.price
-                          ? "取消占比最大"
-                          : "设为占比最大"}
-                      </button>
-                    </div>
-                  </div>
-                )}
               </div>
 
               {/* Random select */}
@@ -866,6 +891,10 @@ export default function Home() {
                   = {results.reduce((s, r) => s + r.subtotal, 0).toFixed(2)}
                 </div>
               </div>
+
+              <Button onClick={exportExcel} variant="outline" className="mt-4 w-full">
+                导出 Excel
+              </Button>
             </CardContent>
           </Card>
         )}
