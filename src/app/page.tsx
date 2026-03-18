@@ -38,6 +38,11 @@ export default function Home() {
   const [minQty, setMinQty] = useState("1");
   const [maxQty, setMaxQty] = useState("");
   const [rowCount, setRowCount] = useState("");
+  const [bulkText, setBulkText] = useState("");
+  const [requiredPrices, setRequiredPrices] = useState<Set<number>>(new Set());
+  const [maxSharePrice, setMaxSharePrice] = useState<number | null>(null);
+  const [randomCount, setRandomCount] = useState("");
+  const [contextMenu, setContextMenu] = useState<{ price: number; x: number; y: number } | null>(null);
   const [results, setResults] = useState<AllocationResult[] | null>(null);
   const [error, setError] = useState("");
 
@@ -56,6 +61,36 @@ export default function Home() {
     setError("");
   }, [newPrice, prices]);
 
+  const addBulk = useCallback(() => {
+    const lines = bulkText
+      .split(/[\n,;\s\t]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const newPrices: number[] = [];
+    const skipped: string[] = [];
+    for (const line of lines) {
+      const v = parseFloat(line);
+      if (isNaN(v) || v <= 0) {
+        skipped.push(line);
+        continue;
+      }
+      if (!prices.includes(v) && !newPrices.includes(v)) {
+        newPrices.push(v);
+      }
+    }
+    if (newPrices.length > 0) {
+      setPrices((prev) => [...prev, ...newPrices]);
+      setBulkText("");
+      setError(
+        skipped.length > 0
+          ? `已添加 ${newPrices.length} 个单价，跳过无效项: ${skipped.join(", ")}`
+          : ""
+      );
+    } else {
+      setError(skipped.length > 0 ? `无有效单价，跳过: ${skipped.join(", ")}` : "没有新的单价可添加");
+    }
+  }, [bulkText, prices]);
+
   const removePrice = useCallback((price: number) => {
     setPrices((prev) => prev.filter((p) => p !== price));
     setSelectedPrices((prev) => {
@@ -63,6 +98,12 @@ export default function Home() {
       next.delete(price);
       return next;
     });
+    setRequiredPrices((prev) => {
+      const next = new Set(prev);
+      next.delete(price);
+      return next;
+    });
+    setMaxSharePrice((prev) => (prev === price ? null : prev));
     setResults(null);
   }, []);
 
@@ -88,6 +129,44 @@ export default function Home() {
     setSelectedPrices(new Set());
     setResults(null);
   }, []);
+
+  const toggleRequired = useCallback((price: number) => {
+    setRequiredPrices((prev) => {
+      const next = new Set(prev);
+      if (next.has(price)) {
+        next.delete(price);
+      } else {
+        next.add(price);
+      }
+      return next;
+    });
+  }, []);
+
+  const randomSelect = useCallback(() => {
+    const count = randomCount ? parseInt(randomCount, 10) : prices.length;
+    if (isNaN(count) || count < 1) {
+      setError("随机选择数量必须为正整数");
+      return;
+    }
+    const required = prices.filter((p) => requiredPrices.has(p));
+    if (count < required.length) {
+      setError(`必选单价有 ${required.length} 个，随机数量不能少于此`);
+      return;
+    }
+    if (count > prices.length) {
+      setError(`随机数量不能超过单价总数（${prices.length}）`);
+      return;
+    }
+
+    // Start with required prices, then randomly pick from the rest
+    const optional = prices.filter((p) => !requiredPrices.has(p));
+    const shuffled = [...optional].sort(() => Math.random() - 0.5);
+    const picked = [...required, ...shuffled.slice(0, count - required.length)];
+
+    setSelectedPrices(new Set(picked));
+    setResults(null);
+    setError("");
+  }, [prices, requiredPrices, randomCount]);
 
   const calculate = useCallback(() => {
     const total = parseFloat(totalAmount);
@@ -141,37 +220,90 @@ export default function Home() {
 
     const n = rowPrices.length;
 
-    if (!integerOnly) {
-      // === Non-integer mode: simple proportional split ===
-      const allocations: AllocationResult[] = [];
-      let usedAmount = 0;
+    // Find indices of maxSharePrice rows (if selected)
+    const maxShareIndices: number[] = [];
+    if (maxSharePrice !== null) {
+      rowPrices.forEach((p, i) => {
+        if (p === maxSharePrice) maxShareIndices.push(i);
+      });
+    }
 
-      for (let i = 0; i < n; i++) {
-        const price = rowPrices[i];
-        if (i < n - 1) {
-          const portion = total / n;
-          let qty = portion / price;
+    if (!integerOnly) {
+      // === Non-integer mode ===
+      const allocations: AllocationResult[] = [];
+
+      if (maxShareIndices.length > 0 && n > 1) {
+        // Give maxShare rows a larger portion, others get smaller equal portions
+        // maxShare rows collectively get 50% + equal share of remaining
+        const maxSharePortion = total * 0.5 + (total * 0.5 * maxShareIndices.length) / n;
+        const otherPortion = total - maxSharePortion;
+        const otherCount = n - maxShareIndices.length;
+        const maxShareSet = new Set(maxShareIndices);
+        let usedAmount = 0;
+        let lastIdx = -1;
+
+        for (let i = 0; i < n; i++) {
+          const price = rowPrices[i];
+          const isMax = maxShareSet.has(i);
+          if (i === n - 1) {
+            lastIdx = i;
+            continue;
+          }
+          const share = isMax
+            ? maxSharePortion / maxShareIndices.length
+            : otherCount > 0
+              ? otherPortion / otherCount
+              : 0;
+          let qty = share / price;
           if (qtyMax !== Infinity && qty > qtyMax) qty = qtyMax;
           if (qty < qtyMin) qty = qtyMin;
           const subtotal = parseFloat((qty * price).toFixed(10));
           usedAmount += subtotal;
           allocations.push({ price, quantity: parseFloat(qty.toFixed(4)), subtotal });
-        } else {
-          const remaining = parseFloat((total - usedAmount).toFixed(10));
-          if (remaining < 0) {
-            setError("无法完成分配，请调整单价或总额");
-            return;
+        }
+
+        // Last row gets remainder
+        const remaining = parseFloat((total - usedAmount).toFixed(10));
+        const lastPrice = rowPrices[lastIdx];
+        const qty = parseFloat((remaining / lastPrice).toFixed(4));
+        if (qtyMax !== Infinity && qty > qtyMax) {
+          setError(`单价 ${lastPrice} 需要数量 ${qty}，超过最大数量 ${qtyMax}`);
+          return;
+        }
+        if (qty < qtyMin) {
+          setError(`单价 ${lastPrice} 的数量 ${qty} 小于最小数量 ${qtyMin}`);
+          return;
+        }
+        allocations.push({ price: lastPrice, quantity: qty, subtotal: parseFloat((qty * lastPrice).toFixed(10)) });
+      } else {
+        let usedAmount = 0;
+        for (let i = 0; i < n; i++) {
+          const price = rowPrices[i];
+          if (i < n - 1) {
+            const portion = total / n;
+            let qty = portion / price;
+            if (qtyMax !== Infinity && qty > qtyMax) qty = qtyMax;
+            if (qty < qtyMin) qty = qtyMin;
+            const subtotal = parseFloat((qty * price).toFixed(10));
+            usedAmount += subtotal;
+            allocations.push({ price, quantity: parseFloat(qty.toFixed(4)), subtotal });
+          } else {
+            const remaining = parseFloat((total - usedAmount).toFixed(10));
+            if (remaining < 0) {
+              setError("无法完成分配，请调整单价或总额");
+              return;
+            }
+            const qty = parseFloat((remaining / price).toFixed(4));
+            if (qtyMax !== Infinity && qty > qtyMax) {
+              setError(`单价 ${price} 需要数量 ${qty}，超过最大数量 ${qtyMax}`);
+              return;
+            }
+            if (qty < qtyMin) {
+              setError(`单价 ${price} 的数量 ${qty} 小于最小数量 ${qtyMin}`);
+              return;
+            }
+            allocations.push({ price, quantity: qty, subtotal: parseFloat((qty * price).toFixed(10)) });
           }
-          const qty = parseFloat((remaining / price).toFixed(4));
-          if (qtyMax !== Infinity && qty > qtyMax) {
-            setError(`单价 ${price} 需要数量 ${qty}，超过最大数量 ${qtyMax}`);
-            return;
-          }
-          if (qty < qtyMin) {
-            setError(`单价 ${price} 的数量 ${qty} 小于最小数量 ${qtyMin}`);
-            return;
-          }
-          allocations.push({ price, quantity: qty, subtotal: parseFloat((qty * price).toFixed(10)) });
         }
       }
       setResults(allocations);
@@ -215,10 +347,28 @@ export default function Home() {
     // If last item doesn't divide evenly, adjust previous item to find a solution
     const extras = new Array(n).fill(0); // extra qty beyond iMin
     let rem = st - minSum;
+    const maxShareSet = new Set(maxShareIndices);
 
     // Distribute to first n-1 items
+    // If maxSharePrice is set, give non-maxShare rows smaller portions
     for (let i = 0; i < n - 1; i++) {
-      const portion = Math.floor(rem / (n - i));
+      const isMax = maxShareSet.has(i);
+      let portion: number;
+      if (maxShareIndices.length > 0 && n > 1) {
+        // maxShare rows get larger share, others get smaller
+        const otherCount = n - maxShareIndices.length;
+        if (isMax) {
+          const maxTotal = Math.floor(rem * 0.5) + Math.floor((rem * 0.5) / n) * maxShareIndices.length;
+          portion = Math.floor(maxTotal / maxShareIndices.length);
+        } else if (otherCount > 0) {
+          const otherTotal = rem - Math.floor(rem * 0.5) - Math.floor((rem * 0.5) / n) * maxShareIndices.length;
+          portion = Math.floor(Math.max(0, otherTotal) / otherCount);
+        } else {
+          portion = Math.floor(rem / (n - i));
+        }
+      } else {
+        portion = Math.floor(rem / (n - i));
+      }
       let extra = Math.floor(portion / sp[i]);
       if (iMax !== Infinity) extra = Math.min(extra, iMax - iMin);
       extras[i] = extra;
@@ -314,8 +464,41 @@ export default function Home() {
       };
     });
 
+    // Post-check: ensure maxShare rows have the largest subtotal
+    if (maxShareIndices.length > 0) {
+      const maxShareSubtotal = Math.min(
+        ...maxShareIndices.map((i) => allocations[i].subtotal)
+      );
+      const otherMaxSubtotal = Math.max(
+        ...allocations
+          .filter((_, i) => !maxShareSet.has(i))
+          .map((a) => a.subtotal),
+        0
+      );
+      if (maxShareSubtotal < otherMaxSubtotal) {
+        // Swap: find the largest non-maxShare and a maxShare row, swap their quantities
+        const largestOtherIdx = allocations.findIndex(
+          (a, i) => !maxShareSet.has(i) && a.subtotal === otherMaxSubtotal
+        );
+        const smallestMaxIdx = maxShareIndices.reduce((best, idx) =>
+          allocations[idx].subtotal < allocations[best].subtotal ? idx : best
+        );
+        // Swap quantities
+        const tmpQty = allocations[largestOtherIdx].quantity;
+        allocations[largestOtherIdx].quantity = allocations[smallestMaxIdx].quantity;
+        allocations[smallestMaxIdx].quantity = tmpQty;
+        // Recalculate subtotals
+        allocations[largestOtherIdx].subtotal = parseFloat(
+          (allocations[largestOtherIdx].quantity * allocations[largestOtherIdx].price).toFixed(10)
+        );
+        allocations[smallestMaxIdx].subtotal = parseFloat(
+          (allocations[smallestMaxIdx].quantity * allocations[smallestMaxIdx].price).toFixed(10)
+        );
+      }
+    }
+
     setResults(allocations);
-  }, [prices, selectedPrices, totalAmount, integerOnly, minQty, maxQty, rowCount]);
+  }, [prices, selectedPrices, totalAmount, integerOnly, minQty, maxQty, rowCount, maxSharePrice]);
 
   return (
     <main className="min-h-screen bg-background p-4 md:p-8">
@@ -329,9 +512,9 @@ export default function Home() {
         <Card>
           <CardHeader>
             <CardTitle>添加单价</CardTitle>
-            <CardDescription>输入单价并添加到列表中</CardDescription>
+            <CardDescription>逐个输入或批量粘贴添加</CardDescription>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-4">
             <div className="flex gap-2">
               <div className="flex-1">
                 <Input
@@ -350,6 +533,23 @@ export default function Home() {
               </div>
               <Button onClick={addPrice}>添加</Button>
             </div>
+            <div className="space-y-2">
+              <Label>批量导入</Label>
+              <textarea
+                className="w-full min-h-[120px] rounded-lg border border-input bg-transparent px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 outline-none"
+                placeholder={"粘贴多行单价，每行一个，例如：\n0.05\n0.1\n0.25\n0.5"}
+                value={bulkText}
+                onChange={(e) => setBulkText(e.target.value)}
+              />
+              <Button
+                variant="outline"
+                onClick={addBulk}
+                disabled={!bulkText.trim()}
+                className="w-full"
+              >
+                批量添加
+              </Button>
+            </div>
           </CardContent>
         </Card>
 
@@ -361,8 +561,10 @@ export default function Home() {
                 <div>
                   <CardTitle>单价列表</CardTitle>
                   <CardDescription>
-                    点击选择参与计算的单价（已选 {selectedPrices.size}/
-                    {prices.length}）
+                    点击选中/取消，右键设置属性（已选 {selectedPrices.size}/
+                    {prices.length}
+                    {requiredPrices.size > 0 && `，必选 ${requiredPrices.size}`}
+                    {maxSharePrice !== null && `，占比最大 ${maxSharePrice}`}）
                   </CardDescription>
                 </div>
                 <div className="flex gap-2">
@@ -375,27 +577,114 @@ export default function Home() {
                 </div>
               </div>
             </CardHeader>
-            <CardContent>
-              <div className="flex flex-wrap gap-2">
-                {prices.map((price) => (
-                  <Badge
-                    key={price}
-                    variant={selectedPrices.has(price) ? "default" : "outline"}
-                    className="cursor-pointer select-none px-3 py-1.5 text-sm"
-                    onClick={() => toggleSelect(price)}
-                  >
-                    {price}
-                    <button
-                      className="ml-2 hover:text-destructive"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        removePrice(price);
+            <CardContent className="space-y-4">
+              <div className="relative flex flex-wrap gap-2">
+                {prices.map((price) => {
+                  const isSelected = selectedPrices.has(price);
+                  const isRequired = requiredPrices.has(price);
+                  const isMaxShare = maxSharePrice === price;
+                  return (
+                    <Badge
+                      key={price}
+                      variant={isSelected ? "default" : "outline"}
+                      className={`cursor-pointer select-none px-3 py-1.5 text-sm ${
+                        isRequired && isMaxShare
+                          ? "ring-2 ring-orange-400 border-blue-400 shadow-[0_0_0_3px_rgba(96,165,250,0.3)]"
+                          : isRequired
+                            ? "ring-2 ring-orange-400"
+                            : isMaxShare
+                              ? "ring-2 ring-blue-400"
+                              : ""
+                      }`}
+                      onClick={() => toggleSelect(price)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        setContextMenu({ price, x: e.clientX, y: e.clientY });
                       }}
                     >
-                      x
-                    </button>
-                  </Badge>
-                ))}
+                      {isRequired && <span className="mr-1 text-orange-400">★</span>}
+                      {isMaxShare && <span className="mr-1 text-blue-400">▲</span>}
+                      {price}
+                      <button
+                        className="ml-2 hover:text-destructive"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removePrice(price);
+                        }}
+                      >
+                        x
+                      </button>
+                    </Badge>
+                  );
+                })}
+
+                {/* Context Menu */}
+                {contextMenu && (
+                  <div
+                    className="fixed inset-0 z-50"
+                    onClick={() => setContextMenu(null)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setContextMenu(null);
+                    }}
+                  >
+                    <div
+                      className="absolute z-50 min-w-[160px] rounded-lg border bg-popover p-1 shadow-md"
+                      style={{ left: contextMenu.x, top: contextMenu.y }}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <button
+                        className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm hover:bg-accent text-left"
+                        onClick={() => {
+                          toggleRequired(contextMenu.price);
+                          setContextMenu(null);
+                        }}
+                      >
+                        <span className="text-orange-400">★</span>
+                        {requiredPrices.has(contextMenu.price) ? "取消必选" : "设为必选"}
+                      </button>
+                      <button
+                        className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm hover:bg-accent text-left"
+                        onClick={() => {
+                          setMaxSharePrice((prev) =>
+                            prev === contextMenu.price ? null : contextMenu.price
+                          );
+                          setContextMenu(null);
+                        }}
+                      >
+                        <span className="text-blue-400">▲</span>
+                        {maxSharePrice === contextMenu.price
+                          ? "取消占比最大"
+                          : "设为占比最大"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Random select */}
+              <div className="flex items-center gap-2 border-t pt-4">
+                <Label htmlFor="randomCount" className="shrink-0">
+                  随机选择
+                </Label>
+                <Input
+                  id="randomCount"
+                  type="text"
+                  inputMode="numeric"
+                  placeholder={`默认全选（${prices.length}）`}
+                  value={randomCount}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v === "" || /^\d+$/.test(v)) {
+                      setRandomCount(v);
+                    }
+                  }}
+                  className="max-w-[180px]"
+                />
+                <span className="text-sm text-muted-foreground shrink-0">个</span>
+                <Button variant="outline" size="sm" onClick={randomSelect}>
+                  随机
+                </Button>
               </div>
             </CardContent>
           </Card>
