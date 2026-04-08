@@ -41,8 +41,10 @@ export default function Home() {
   const [bulkText, setBulkText] = useState("");
   const [requiredPrices, setRequiredPrices] = useState<Set<number>>(new Set());
   const [maxSharePrice, setMaxSharePrice] = useState<number | null>(null);
+  const [maxShareType, setMaxShareType] = useState<"amount" | "quantity">("amount");
   const [randomCount, setRandomCount] = useState("");
   const [contextMenu, setContextMenu] = useState<{ price: number; x: number; y: number } | null>(null);
+  const [allowAdjust, setAllowAdjust] = useState(true);
   const [results, setResults] = useState<AllocationResult[] | null>(null);
   const [error, setError] = useState("");
 
@@ -467,6 +469,19 @@ export default function Home() {
       }
     }
 
+    if (lastExtra === null && allowAdjust) {
+      const rounded = Math.round(rem / sp[n - 1]);
+      const candidates = [rounded, rounded - 1, rounded + 1]
+        .filter((q) => q >= 0 && (iMax === Infinity || iMin + q <= iMax));
+      if (candidates.length > 0) {
+        candidates.sort(
+          (a, b) =>
+            Math.abs(a * sp[n - 1] - rem) - Math.abs(b * sp[n - 1] - rem)
+        );
+        lastExtra = candidates[0];
+      }
+    }
+
     if (lastExtra === null) {
       setError(
         "在整数数量约束下无法精确匹配总额，请尝试调整总额、单价或数量范围"
@@ -486,41 +501,69 @@ export default function Home() {
       };
     });
 
-    // Post-check: ensure maxShare rows have the largest subtotal
+    // Post-check: ensure maxShare rows have the largest share
     if (maxShareIndices.length > 0) {
-      const maxShareSubtotal = Math.min(
-        ...maxShareIndices.map((i) => allocations[i].subtotal)
-      );
-      const otherMaxSubtotal = Math.max(
-        ...allocations
-          .filter((_, i) => !maxShareSet.has(i))
-          .map((a) => a.subtotal),
-        0
-      );
-      if (maxShareSubtotal < otherMaxSubtotal) {
-        // Swap: find the largest non-maxShare and a maxShare row, swap their quantities
-        const largestOtherIdx = allocations.findIndex(
-          (a, i) => !maxShareSet.has(i) && a.subtotal === otherMaxSubtotal
+      if (maxShareType === "quantity") {
+        // Quantity-based: ensure maxShare rows have the largest quantity
+        const maxShareQty = Math.min(
+          ...maxShareIndices.map((i) => allocations[i].quantity)
         );
-        const smallestMaxIdx = maxShareIndices.reduce((best, idx) =>
-          allocations[idx].subtotal < allocations[best].subtotal ? idx : best
+        const otherMaxQty = Math.max(
+          ...allocations
+            .filter((_, i) => !maxShareSet.has(i))
+            .map((a) => a.quantity),
+          0
         );
-        // Swap quantities
-        const tmpQty = allocations[largestOtherIdx].quantity;
-        allocations[largestOtherIdx].quantity = allocations[smallestMaxIdx].quantity;
-        allocations[smallestMaxIdx].quantity = tmpQty;
-        // Recalculate subtotals
-        allocations[largestOtherIdx].subtotal = parseFloat(
-          (allocations[largestOtherIdx].quantity * allocations[largestOtherIdx].price).toFixed(10)
+        if (maxShareQty < otherMaxQty) {
+          const largestOtherIdx = allocations.findIndex(
+            (a, i) => !maxShareSet.has(i) && a.quantity === otherMaxQty
+          );
+          const smallestMaxIdx = maxShareIndices.reduce((best, idx) =>
+            allocations[idx].quantity < allocations[best].quantity ? idx : best
+          );
+          const tmpQty = allocations[largestOtherIdx].quantity;
+          allocations[largestOtherIdx].quantity = allocations[smallestMaxIdx].quantity;
+          allocations[smallestMaxIdx].quantity = tmpQty;
+          allocations[largestOtherIdx].subtotal = parseFloat(
+            (allocations[largestOtherIdx].quantity * allocations[largestOtherIdx].price).toFixed(10)
+          );
+          allocations[smallestMaxIdx].subtotal = parseFloat(
+            (allocations[smallestMaxIdx].quantity * allocations[smallestMaxIdx].price).toFixed(10)
+          );
+        }
+      } else {
+        // Amount-based: ensure maxShare rows have the largest subtotal
+        const maxShareSubtotal = Math.min(
+          ...maxShareIndices.map((i) => allocations[i].subtotal)
         );
-        allocations[smallestMaxIdx].subtotal = parseFloat(
-          (allocations[smallestMaxIdx].quantity * allocations[smallestMaxIdx].price).toFixed(10)
+        const otherMaxSubtotal = Math.max(
+          ...allocations
+            .filter((_, i) => !maxShareSet.has(i))
+            .map((a) => a.subtotal),
+          0
         );
+        if (maxShareSubtotal < otherMaxSubtotal) {
+          const largestOtherIdx = allocations.findIndex(
+            (a, i) => !maxShareSet.has(i) && a.subtotal === otherMaxSubtotal
+          );
+          const smallestMaxIdx = maxShareIndices.reduce((best, idx) =>
+            allocations[idx].subtotal < allocations[best].subtotal ? idx : best
+          );
+          const tmpQty = allocations[largestOtherIdx].quantity;
+          allocations[largestOtherIdx].quantity = allocations[smallestMaxIdx].quantity;
+          allocations[smallestMaxIdx].quantity = tmpQty;
+          allocations[largestOtherIdx].subtotal = parseFloat(
+            (allocations[largestOtherIdx].quantity * allocations[largestOtherIdx].price).toFixed(10)
+          );
+          allocations[smallestMaxIdx].subtotal = parseFloat(
+            (allocations[smallestMaxIdx].quantity * allocations[smallestMaxIdx].price).toFixed(10)
+          );
+        }
       }
     }
 
     setResults(allocations);
-  }, [prices, selectedPrices, totalAmount, integerOnly, minQty, maxQty, rowCount, maxSharePrice]);
+  }, [prices, selectedPrices, totalAmount, integerOnly, minQty, maxQty, rowCount, maxSharePrice, maxShareType, allowAdjust]);
 
   return (
     <main className="min-h-screen bg-background p-4 md:p-8">
@@ -586,7 +629,7 @@ export default function Home() {
                     点击选中/取消，点 ⚙ 设置属性（已选 {selectedPrices.size}/
                     {prices.length}
                     {requiredPrices.size > 0 && `，必选 ${requiredPrices.size}`}
-                    {maxSharePrice !== null && `，占比最大 ${maxSharePrice}`}）
+                    {maxSharePrice !== null && `，${maxShareType === "amount" ? "金额" : "数量"}占比最大 ${maxSharePrice}`}）
                   </CardDescription>
                 </div>
                 <div className="flex gap-2">
@@ -615,25 +658,32 @@ export default function Home() {
                             : "bg-background border-input hover:bg-accent"
                         } ${
                           isRequired && isMaxShare
-                            ? "ring-2 ring-orange-400 shadow-[0_0_0_3px_rgba(96,165,250,0.3)]"
+                            ? maxShareType === "amount"
+                              ? "ring-2 ring-orange-400 shadow-[0_0_0_3px_rgba(96,165,250,0.3)]"
+                              : "ring-2 ring-orange-400 shadow-[0_0_0_3px_rgba(74,222,128,0.3)]"
                             : isRequired
                               ? "ring-2 ring-orange-400"
                               : isMaxShare
-                                ? "ring-2 ring-blue-400"
+                                ? maxShareType === "amount"
+                                  ? "ring-2 ring-blue-400"
+                                  : "ring-2 ring-green-400"
                                 : ""
                         }`}
                         onClick={() => toggleSelect(price)}
                       >
                         {isRequired && <span className="text-orange-400">★</span>}
-                        {isMaxShare && <span className="text-blue-400">▲</span>}
+                        {isMaxShare && <span className={maxShareType === "amount" ? "text-blue-400" : "text-green-400"}>▲</span>}
                         <span>{price}</span>
                         <button
                           className="ml-1 rounded p-0.5 opacity-60 hover:opacity-100"
                           onClick={(e) => {
                             e.stopPropagation();
-                            setContextMenu(
-                              isMenuOpen ? null : { price, x: 0, y: 0 }
-                            );
+                            if (isMenuOpen) {
+                              setContextMenu(null);
+                            } else {
+                              const rect = e.currentTarget.getBoundingClientRect();
+                              setContextMenu({ price, x: rect.left, y: rect.bottom + 4 });
+                            }
                           }}
                         >
                           ⚙
@@ -656,7 +706,7 @@ export default function Home() {
                             className="fixed inset-0 z-40"
                             onClick={() => setContextMenu(null)}
                           />
-                          <div className="absolute left-0 top-full z-50 mt-1 min-w-[160px] rounded-lg border bg-popover p-1 shadow-lg">
+                          <div className="fixed z-[9999] min-w-[160px] rounded-lg border bg-popover p-1 shadow-lg" style={{ left: contextMenu?.x, top: contextMenu?.y }}>
                             <button
                               className="flex w-full items-center gap-2 rounded-md px-3 py-2.5 text-sm hover:bg-accent text-left"
                               onClick={() => {
@@ -670,14 +720,32 @@ export default function Home() {
                             <button
                               className="flex w-full items-center gap-2 rounded-md px-3 py-2.5 text-sm hover:bg-accent text-left"
                               onClick={() => {
-                                setMaxSharePrice((prev) =>
-                                  prev === price ? null : price
-                                );
+                                if (maxSharePrice === price && maxShareType === "amount") {
+                                  setMaxSharePrice(null);
+                                } else {
+                                  setMaxSharePrice(price);
+                                  setMaxShareType("amount");
+                                }
                                 setContextMenu(null);
                               }}
                             >
                               <span className="text-blue-400">▲</span>
-                              {isMaxShare ? "取消占比最大" : "设为占比最大"}
+                              {isMaxShare && maxShareType === "amount" ? "取消金额占比最大" : "设为金额占比最大"}
+                            </button>
+                            <button
+                              className="flex w-full items-center gap-2 rounded-md px-3 py-2.5 text-sm hover:bg-accent text-left"
+                              onClick={() => {
+                                if (maxSharePrice === price && maxShareType === "quantity") {
+                                  setMaxSharePrice(null);
+                                } else {
+                                  setMaxSharePrice(price);
+                                  setMaxShareType("quantity");
+                                }
+                                setContextMenu(null);
+                              }}
+                            >
+                              <span className="text-green-400">▲</span>
+                              {isMaxShare && maxShareType === "quantity" ? "取消数量占比最大" : "设为数量占比最大"}
                             </button>
                           </div>
                         </>
@@ -817,6 +885,22 @@ export default function Home() {
               <Label htmlFor="integerOnly">数量必须为整数</Label>
             </div>
 
+            {integerOnly && (
+              <div className="flex items-center gap-3 ml-8">
+                <Switch
+                  id="allowAdjust"
+                  checked={allowAdjust}
+                  onCheckedChange={(checked) => {
+                    setAllowAdjust(checked);
+                    setResults(null);
+                  }}
+                />
+                <Label htmlFor="allowAdjust" className="text-sm text-muted-foreground">
+                  无法精确匹配时允许微调总额
+                </Label>
+              </div>
+            )}
+
             <Button
               onClick={calculate}
               disabled={selectedPrices.size === 0}
@@ -840,7 +924,23 @@ export default function Home() {
             <CardHeader>
               <CardTitle>分配结果</CardTitle>
               <CardDescription>
-                各单价对应的数量和小计，合计等于目标总额
+                {(() => {
+                  const actualTotal = results.reduce((s, r) => s + r.subtotal, 0);
+                  const target = parseFloat(totalAmount);
+                  const diff = parseFloat((actualTotal - target).toFixed(2));
+                  if (diff !== 0) {
+                    return (
+                      <>
+                        已微调总额：实际 {actualTotal.toFixed(2)}（目标 {target}，差异{" "}
+                        <span className={diff > 0 ? "text-orange-500" : "text-blue-500"}>
+                          {diff > 0 ? "+" : ""}{diff}
+                        </span>
+                        ）
+                      </>
+                    );
+                  }
+                  return "各单价对应的数量和小计，合计等于目标总额";
+                })()}
               </CardDescription>
             </CardHeader>
             <CardContent>
